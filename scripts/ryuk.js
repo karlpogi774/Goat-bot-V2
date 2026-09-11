@@ -1,0 +1,316 @@
+const axios = require("axios");
+
+module.exports.config = {
+  name: "activate",
+  version: "15.0.0",
+  hasPermission: 0,
+  credits: "sinzu",
+  description: "Cloud-persisted auto-roast bot (Render safe & non-resettable) with dog react, self react, and auto name locks.",
+  usePrefix: true,
+  commandCategory: "Fun",
+  usages: "/activate on | off | status | add <text> | listlines | setnick <name> | setgname <name>",
+  cooldowns: 5
+};
+
+// ================= API KEYS & CONFIG =================
+const ADMIN_UID = "61594022290817";
+const DEFAULT_TARGET_NAME = "Ryuk pogi";
+const DOG_EMOJI = "🐶";
+
+// LAGAY MO DITO ANG MGA NAKUHA MO SA JSONBIN.IO
+const JSONBIN_API_KEY = "LAGAY_MO_DITO_ANG_MASTER_KEY";
+const JSONBIN_BIN_ID = "LAGAY_MO_DITO_ANG_BIN_ID";
+
+const REACT_EMOJIS = ["🔥", "💀", "🤣", "😆", "🤡", "👎", "💩", "👻"];
+
+const DEFAULT_TAGALOG_ROASTS = [
+  "Luh, nag-type pa talaga siya oh, akala mo naman may kumpirmasyon. 💀",
+  "Lods, paki-delete na lang 'to bago pa makita ng iba, nakakahiya. 🤣",
+  "Lakas ng loob mo mag-chat, pero yung sinabi mo walang kwenta.",
+  "Sino nagtanong sa'yo? Lakas maka-main character ah.",
+  "Bro, isip muna bago pindot ng send button, napapahalata ka eh.",
+  "Pang-asar ba 'yan o self-humiliation? Clarify natin.",
+  "Sana bago ka nag-text, nag-isip ka muna ng limang beses.",
+  "Quiet ka na lang muna lods, nauubusan na kami ng patience sa'yo.",
+  "I-off mo na wifi mo, hindi para sa'yo ang araw na 'to.",
+  "Ganda ng sinabi mo ah, kasing ganda ng blankong papel. 🤡",
+  "Ulitin mo nga 'yan, para mas lalo ka naming pagtawanan.",
+  "May group chat restraint order ka na ba? Kasi lapit na kita i-report.",
+  "Tigilan mo na 'yan, pati 'yung keyboard mo sumusuko na sa'yo.",
+  "Confidence level: 100%. Sense level: 0%.",
+  "Sige lang, ipagpatuloy mo 'yan... hanggang sa wala nang makipag-usap sa'yo.",
+  "Ayan ka na naman, nagkakalat ka na naman ng ingay sa GC.",
+  "Subukan mo kayang mag-isip bago mag-type? Baka makatulong.",
+  "Ang ingay mo, wala ka namang maipagmamabang.",
+  "Kung degree ang pagiging corny, summa cum laude ka na siguro.",
+  "Bakit ka nag-chat? May humingi ba ng opinyon mo?",
+  "Hindi ka nakakatuwa, nakakaawa ka na pakinggan.",
+  "Yung utak mo parang Internet Explorer, huling-huli sa balita.",
+  "Lakas magmarunong pero nung nagtanong, nganga naman.",
+  "Tulog mo na lang 'yan lods, wala ka talagang mapapala ngayon.",
+  "Walang nakikinig sa'yo, kaya wag ka nang mag-aksaya ng laway.",
+  "Gusto mo ba ng medalya dahil sa walang katuturan mong sinabi?",
+  "Tae ka ba? Kasi nakaka-bwisit ka sa paningin.",
+  "Puro ka dada, zero performance ka naman sa totoong buhay.",
+  "Sana binasa mo muna bago mo pinindot 'yung send.",
+  "Dami mong sinasabi, wala namang katuturan."
+];
+
+// Memory cache para mabilis ang tugon
+let memoryData = { activeThreads: {}, gcNames: {}, nicknames: {}, roasts: DEFAULT_TAGALOG_ROASTS };
+
+// Cloud load mula JSONBin
+async function loadData() {
+  try {
+    const res = await axios.get(`https://api.jsonbin.io/v3/b/${JSONBIN_BIN_ID}/latest`, {
+      headers: { "X-Master-Key": JSONBIN_API_KEY }
+    });
+    if (res.data && res.data.record) {
+      memoryData = res.data.record;
+      if (!memoryData.activeThreads) memoryData.activeThreads = {};
+      if (!memoryData.gcNames) memoryData.gcNames = {};
+      if (!memoryData.nicknames) memoryData.nicknames = {};
+      if (!memoryData.roasts || memoryData.roasts.length === 0) memoryData.roasts = DEFAULT_TAGALOG_ROASTS;
+    }
+  } catch (err) {
+    console.error("[JSONBin Load Error]:", err.message);
+  }
+  return memoryData;
+}
+
+// Cloud save papuntang JSONBin
+async function saveData(data) {
+  memoryData = data;
+  try {
+    await axios.put(`https://api.jsonbin.io/v3/b/${JSONBIN_BIN_ID}`, data, {
+      headers: {
+        "Content-Type": "application/json",
+        "X-Master-Key": JSONBIN_API_KEY
+      }
+    });
+  } catch (err) {
+    console.error("[JSONBin Save Error]:", err.message);
+  }
+}
+
+function isThreadActive(threadID) {
+  return !!(memoryData.activeThreads && memoryData.activeThreads[threadID]);
+}
+
+const lastResponseTime = new Map();
+const COOLDOWN_DELAY = 4000;
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+function safeReact(api, emoji, msgID) {
+  if (!msgID) return;
+  try {
+    api.setMessageReaction(emoji, msgID, (err) => {}, true);
+  } catch (e) {}
+}
+
+// Initial fetch kapag nag-boot ang script sa Render
+loadData();
+
+// ===== EVENT HANDLER =====
+module.exports.handleEvent = async function ({ api, event }) {
+  const { threadID, senderID, body, messageID, logMessageType, logMessageData } = event;
+
+  if (!isThreadActive(threadID)) return;
+
+  const currentLockedGcName = memoryData.gcNames[threadID] || DEFAULT_TARGET_NAME;
+  const currentLockedNickname = memoryData.nicknames[threadID] || DEFAULT_TARGET_NAME;
+
+  // 1. AUTO-REVERT GC NAME
+  if (logMessageType === "log:thread-name") {
+    if (logMessageData && logMessageData.name !== currentLockedGcName) {
+      await sleep(1500);
+      api.setTitle(currentLockedGcName, threadID, () => {});
+    }
+    return;
+  }
+
+  // 2. AUTO-REVERT NICKNAME
+  if (logMessageType === "log:user-nickname") {
+    const changedParticipantID = logMessageData ? logMessageData.participant_id : null;
+    const newNickname = logMessageData ? logMessageData.nickname : "";
+
+    if (changedParticipantID && newNickname !== currentLockedNickname) {
+      await sleep(1500);
+      api.changeNickname(currentLockedNickname, threadID, changedParticipantID, () => {});
+    }
+    return;
+  }
+
+  if (!body || senderID === api.getCurrentUserID() || body.toLowerCase().startsWith("/activate")) return;
+
+  const now = Date.now();
+  const lastTime = lastResponseTime.get(threadID) || 0;
+
+  if (now - lastTime < COOLDOWN_DELAY) return;
+  lastResponseTime.set(threadID, now);
+
+  try {
+    await sleep(600);
+    safeReact(api, DOG_EMOJI, messageID);
+
+    const roastsList = memoryData.roasts && memoryData.roasts.length > 0 ? memoryData.roasts : DEFAULT_TAGALOG_ROASTS;
+    const randomRoast = roastsList[Math.floor(Math.random() * roastsList.length)];
+    const randomSelfEmoji = REACT_EMOJIS[Math.floor(Math.random() * REACT_EMOJIS.length)];
+
+    await sleep(2000);
+
+    api.sendMessage({
+      body: randomRoast,
+      mentions: [{ tag: `@${senderID}`, id: senderID }]
+    }, threadID, async (err, info) => {
+      if (!err && info && info.messageID) {
+        await sleep(1200);
+        safeReact(api, randomSelfEmoji, info.messageID);
+      }
+    }, messageID);
+  } catch (error) {
+    console.error("Auto-reply error:", error);
+  }
+};
+
+// ===== COMMAND HANDLER =====
+module.exports.run = async function ({ api, event, args }) {
+  const { threadID, messageID, senderID } = event;
+
+  if (String(senderID) !== ADMIN_UID) {
+    return api.sendMessage("❌ Restricted Command: Si Admin lang ang pwedeng gumamit nito.", threadID, messageID);
+  }
+
+  await loadData();
+  const sub = (args[0] || "").toLowerCase();
+
+  if (sub === "on") {
+    if (!memoryData.activeThreads) memoryData.activeThreads = {};
+    memoryData.activeThreads[threadID] = true;
+
+    if (!memoryData.gcNames[threadID]) memoryData.gcNames[threadID] = DEFAULT_TARGET_NAME;
+    if (!memoryData.nicknames[threadID]) memoryData.nicknames[threadID] = DEFAULT_TARGET_NAME;
+
+    await saveData(memoryData);
+
+    const targetGcName = memoryData.gcNames[threadID];
+    const targetNickname = memoryData.nicknames[threadID];
+
+    api.setTitle(targetGcName, threadID, () => {});
+
+    try {
+      const threadInfo = await api.getThreadInfo(threadID);
+      for (const userID of threadInfo.participantIDs) {
+        await sleep(1000);
+        api.changeNickname(targetNickname, threadID, userID, () => {});
+      }
+    } catch (e) {}
+
+    return api.sendMessage(
+      `🔥 LOCAL GC AUTO-ROAST: ON (CLOUD-SAVED)\n\n` +
+      `Focus Mode: Naka-focus lang dito sa GC 🎯\n` +
+      `Target Chat React: 🐶 (Aso)\n` +
+      `Bot Self React: ACTIVE\n` +
+      `Locked GC Name: "${targetGcName}"\n` +
+      `Locked Nicknames: "${targetNickname}"\n\n` +
+      `Ligtas na sa Render Reset! ☁️`,
+      threadID,
+      messageID
+    );
+  }
+
+  if (sub === "off") {
+    if (memoryData.activeThreads && memoryData.activeThreads[threadID]) {
+      delete memoryData.activeThreads[threadID];
+      await saveData(memoryData);
+    }
+    return api.sendMessage("✅ Naka-OFF na ang auto-roast sa GC na ito.", threadID, messageID);
+  }
+
+  if (sub === "setgname") {
+    const newGcName = args.slice(1).join(" ");
+    if (!newGcName) return api.sendMessage("❌ Paki-lagay ang gustong GC Name.", threadID, messageID);
+
+    memoryData.gcNames[threadID] = newGcName;
+    await saveData(memoryData);
+
+    api.setTitle(newGcName, threadID, (err) => {
+      if (err) return api.sendMessage("❌ Bigo sa pagpapalit ng GC Name.", threadID, messageID);
+      return api.sendMessage(`✅ Na-set at na-lock na ang GC Name sa: "${newGcName}"`, threadID, messageID);
+    });
+    return;
+  }
+
+  if (sub === "setnick") {
+    const newNickname = args.slice(1).join(" ");
+    if (!newNickname) return api.sendMessage("❌ Paki-lagay ang gustong Nickname.", threadID, messageID);
+
+    memoryData.nicknames[threadID] = newNickname;
+    await saveData(memoryData);
+
+    try {
+      const threadInfo = await api.getThreadInfo(threadID);
+      const participantIDs = threadInfo.participantIDs;
+
+      api.sendMessage(`⏳ Binabago ang nicknames...`, threadID);
+
+      for (const userID of participantIDs) {
+        await sleep(1000);
+        api.changeNickname(newNickname, threadID, userID, () => {});
+      }
+      return api.sendMessage(`✅ Tagumpay na nabago at na-lock ang lahat ng nicknames sa: "${newNickname}"`, threadID, messageID);
+    } catch (e) {
+      return api.sendMessage("❌ Bigo sa pagbago ng nicknames.", threadID, messageID);
+    }
+  }
+
+  if (sub === "add") {
+    const customLine = args.slice(1).join(" ");
+    if (!customLine) return api.sendMessage("❌ Paki-lagay 'yung linyang gusto mong idagdag.", threadID, messageID);
+
+    if (!memoryData.roasts) memoryData.roasts = DEFAULT_TAGALOG_ROASTS;
+    memoryData.roasts.push(customLine);
+    await saveData(memoryData);
+
+    return api.sendMessage(`✅ Tagumpay na naidagdag ang bagong linya:\n"${customLine}"`, threadID, messageID);
+  }
+
+  if (sub === "listlines") {
+    const list = memoryData.roasts || DEFAULT_TAGALOG_ROASTS;
+    let msg = `📜 Lahat ng Tagalog Reply Lines (${list.length}):\n\n`;
+    list.forEach((line, index) => {
+      msg += `${index + 1}. ${line}\n`;
+    });
+    return api.sendMessage(msg, threadID, messageID);
+  }
+
+  if (sub === "status") {
+    const activeHere = isThreadActive(threadID);
+    const targetGcName = memoryData.gcNames[threadID] || DEFAULT_TARGET_NAME;
+    const targetNickname = memoryData.nicknames[threadID] || DEFAULT_TARGET_NAME;
+    const totalLines = (memoryData.roasts || DEFAULT_TAGALOG_ROASTS).length;
+
+    return api.sendMessage(
+      `🔥 STATUS SA GC NA ITO (CLOUD SAVED):\n` +
+      `Active: ${activeHere ? "YES 🟢" : "NO 🔴"}\n` +
+      `Locked GC Name: "${targetGcName}"\n` +
+      `Locked Nickname: "${targetNickname}"\n` +
+      `Total Roast Lines: ${totalLines}`,
+      threadID,
+      messageID
+    );
+  }
+
+  return api.sendMessage(
+    `Mga Paggamit (Admin Only):\n` +
+    `/activate on — Simulan ang auto-roast (Persistent Cloud Data)\n` +
+    `/activate off — Itigil sa GC na 'to\n` +
+    `/activate setgname <name> — Mag-set ng GC Name\n` +
+    `/activate setnick <nickname> — Mag-set ng Nickname\n` +
+    `/activate add <text> — Magdagdag ng linya\n` +
+    `/activate listlines — Ilista ang mga linya\n` +
+    `/activate status — Tignan ang status`,
+    threadID,
+    messageID
+  );
+};
